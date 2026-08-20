@@ -9,7 +9,7 @@ from ipc import (
 )
 
 
-IPC_FILE = "test_chronosmatch.ipc"
+IPC_FILE = "test_market-firhose-mmap.ipc"
 
 
 def main():
