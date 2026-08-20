@@ -1,0 +1,234 @@
+# market-firehose-mmap
+import mmap
+import struct
+import asyncio
+import random
+import time
+import os
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+FILE_NAME = "/content/ring_buffer.dat"
+
+CAPACITY = 100_000
+
+# Order ID = Q = 8 bytes
+# Price    = d = 8 bytes
+# Quantity = I = 4 bytes
+RECORD_SIZE = struct.calcsize("QdI")
+
+# Header stores write index and read index
+HEADER_SIZE = 16
+
+TOTAL_SIZE = HEADER_SIZE + (CAPACITY * RECORD_SIZE)
+
+TARGET_RATE = 100_000
+BATCH_SIZE = 1_000
+
+
+# ============================================================
+# CREATE MEMORY-MAPPED FILE
+# ============================================================
+
+with open(FILE_NAME, "w+b") as f:
+    f.truncate(TOTAL_SIZE)
+
+    mm = mmap.mmap(
+        f.fileno(),
+        TOTAL_SIZE,
+        access=mmap.ACCESS_WRITE
+    )
+
+
+# ============================================================
+# INDEX FUNCTIONS
+# ============================================================
+
+def get_write_index():
+    return struct.unpack_from("Q", mm, 0)[0]
+
+
+def set_write_index(value):
+    struct.pack_into("Q", mm, 0, value)
+
+
+def get_read_index():
+    return struct.unpack_from("Q", mm, 8)[0]
+
+
+def set_read_index(value):
+    struct.pack_into("Q", mm, 8, value)
+
+
+# Initialize indexes
+
+set_write_index(0)
+set_read_index(0)
+
+
+# ============================================================
+# WRITE TRADE
+# ============================================================
+
+def write_trade(order_id, price, quantity):
+
+    write_index = get_write_index()
+
+    position = write_index % CAPACITY
+
+    offset = HEADER_SIZE + (position * RECORD_SIZE)
+
+    # Convert Python values into raw bytes
+    struct.pack_into(
+        "QdI",
+        mm,
+        offset,
+        order_id,
+        price,
+        quantity
+    )
+
+    # Move write index
+    set_write_index(write_index + 1)
+
+
+# ============================================================
+# READ TRADE
+# ============================================================
+
+def read_trade():
+
+    read_index = get_read_index()
+    write_index = get_write_index()
+
+    # Nothing available
+    if read_index >= write_index:
+        return None
+
+    position = read_index % CAPACITY
+
+    offset = HEADER_SIZE + (position * RECORD_SIZE)
+
+    # Convert raw bytes back into Python values
+    order_id, price, quantity = struct.unpack_from(
+        "QdI",
+        mm,
+        offset
+    )
+
+    # Move read index
+    set_read_index(read_index + 1)
+
+    return order_id, price, quantity
+
+
+# ============================================================
+# ASYNCIO PRODUCER
+# ============================================================
+
+async def market_firehose():
+
+    order_id = 1
+
+    start_time = time.perf_counter()
+
+    total_orders = 0
+
+    while total_orders < TARGET_RATE:
+
+        batch_start = time.perf_counter()
+
+        for _ in range(BATCH_SIZE):
+
+            price = round(
+                random.uniform(100, 500),
+                2
+            )
+
+            quantity = random.randint(1, 100)
+
+            write_trade(
+                order_id,
+                price,
+                quantity
+            )
+
+            order_id += 1
+            total_orders += 1
+
+            if total_orders >= TARGET_RATE:
+                break
+
+        # Yield control to event loop
+        await asyncio.sleep(0)
+
+    elapsed = time.perf_counter() - start_time
+
+    print()
+    print("======================================")
+    print("MARKET FIREHOSE FINISHED")
+    print("======================================")
+    print(f"Orders generated : {total_orders:,}")
+    print(f"Time taken       : {elapsed:.4f} seconds")
+    print(f"Actual rate      : {total_orders / elapsed:,.0f} orders/sec")
+
+
+# ============================================================
+# CONSUMER
+# ============================================================
+
+async def consumer():
+
+    consumed = 0
+
+    while consumed < TARGET_RATE:
+
+        trade = read_trade()
+
+        if trade is not None:
+
+            order_id, price, quantity = trade
+
+            consumed += 1
+
+            # Print first 10 orders only
+            if consumed <= 10:
+
+                print(
+                    f"Order ID: {order_id} | "
+                    f"Price: {price:.2f} | "
+                    f"Quantity: {quantity}"
+                )
+
+        else:
+
+            # Give control back to asyncio
+            await asyncio.sleep(0)
+
+    print()
+    print("======================================")
+    print("CONSUMER FINISHED")
+    print("======================================")
+    print(f"Orders consumed: {consumed:,}")
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+async def main():
+
+    await asyncio.gather(
+        market_firehose(),
+        consumer()
+    )
+
+
+# ============================================================
+# GOOGLE COLAB
+# ============================================================
+
+await main()
